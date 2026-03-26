@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import re
+import time
 
 # ---------------- LANGCHAIN ----------------
 from langchain_groq import ChatGroq
@@ -14,7 +15,8 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     VideoUnavailable,
-    NoTranscriptFound
+    NoTranscriptFound,
+    RequestBlocked
 )
 
 # ---------------- VECTOR DB ----------------
@@ -24,7 +26,7 @@ from langchain_community.vectorstores import FAISS
 
 # ---------------- PAGE ----------------
 st.set_page_config(page_title="YouTube RAG Chatbot", layout="wide")
-st.title("🎥 YouTube RAG Chatbot")
+st.title("🎥 YouTube RAG Chatbot (Unblock Version 🚀)")
 
 
 # ---------------- API KEY ----------------
@@ -63,29 +65,52 @@ if not video_id:
 st.video(f"https://www.youtube.com/watch?v={video_id}")
 
 
+# ---------------- MANUAL TRANSCRIPT FALLBACK ----------------
+manual_transcript = st.text_area("📄 (Optional) Paste transcript if auto-fetch fails")
+
+
 # ---------------- CACHE VECTOR DB ----------------
 @st.cache_resource
-def create_vector_store(video_id):
-    try:
-        # Try Hindi + English
-        transcript_list = YouTubeTranscriptApi().fetch(
-            video_id,
-            languages=["hi", "en"]
-        )
-    except NoTranscriptFound:
+def create_vector_store(video_id, manual_text):
+
+    transcript_list = None
+
+    # 🔥 RETRY LOGIC
+    for _ in range(3):
         try:
-            transcript_list = YouTubeTranscriptApi().fetch(video_id)
-        except Exception:
+            transcript_list = YouTubeTranscriptApi().fetch(
+                video_id,
+                languages=["hi", "en"]
+            )
+            break
+
+        except RequestBlocked:
+            time.sleep(2)
+
+        except NoTranscriptFound:
+            try:
+                transcript_list = YouTubeTranscriptApi().fetch(video_id)
+                break
+            except:
+                pass
+
+        except (TranscriptsDisabled, VideoUnavailable):
+            break
+
+    # ❌ If still failed → use manual input
+    if transcript_list is None:
+        if manual_text.strip() == "":
             return None
+        else:
+            transcript = manual_text
+            docs = [{"text": transcript, "timestamp": 0}]
+    else:
+        docs = [
+            {"text": chunk.text, "timestamp": int(chunk.start)}
+            for chunk in transcript_list
+        ]
 
-    docs = []
-    for chunk in transcript_list:
-        docs.append({
-            "text": chunk.text,
-            "timestamp": int(chunk.start)
-        })
-
-    # ✅ FIXED CHUNKING
+    # ---------------- SPLIT ----------------
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=150
@@ -100,7 +125,7 @@ def create_vector_store(video_id):
                 "metadata": {"timestamp": d["timestamp"]}
             })
 
-    # ✅ MULTILINGUAL EMBEDDING
+    # ---------------- EMBEDDING ----------------
     embedding = HuggingFaceEmbeddings(
         model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     )
@@ -113,14 +138,14 @@ def create_vector_store(video_id):
 
 
 # ---------------- LOAD DB ----------------
-vector_store = create_vector_store(video_id)
+vector_store = create_vector_store(video_id, manual_transcript)
 
 if vector_store is None:
-    st.error("❌ Transcript not available for this video")
+    st.error("❌ Could not fetch transcript (blocked or unavailable). Paste transcript manually.")
     st.stop()
 
 
-# ✅ BETTER RETRIEVAL
+# ---------------- RETRIEVER ----------------
 retriever = vector_store.as_retriever(
     search_type="mmr",
     search_kwargs={"k": 5, "fetch_k": 20}
@@ -141,27 +166,19 @@ prompt = PromptTemplate(
         "You are a smart AI assistant that explains concepts from YouTube transcripts.\n\n"
 
         "GOAL:\n"
-        "- Give a clear, direct, and helpful answer.\n"
-        "- Use transcript as PRIMARY source.\n"
-        "- If full answer is not present, infer logically from available context.\n\n"
+        "- Give a clear, lengthy, and helpful answer\n"
+        "- Use transcript as primary source\n"
+        "- Infer logically if needed\n\n"
 
         "RULES:\n"
-        "- Do NOT repeat phrases like 'transcript does not provide'.\n"
-        "- Do NOT loop or repeat same sentences.\n"
-        "- Do NOT hallucinate unrelated info.\n"
-        "- Be confident and natural like ChatGPT.\n"
-        "- Answer in same language as question.\n\n"
-
-        "FORMAT:\n"
-        "- Start with clear explanation\n"
-        "- Use bullet points if needed\n"
-        "- Add timestamps ONLY if useful\n\n"
+        "- Do NOT repeat phrases\n"
+        "- Do NOT hallucinate unrelated info\n"
+        "- Answer in same language as question\n\n"
 
         "TRANSCRIPT:\n{content}\n\n"
         "CHAT HISTORY:\n{history}\n\n"
         "QUESTION:\n{question}\n\n"
-
-        "FINAL ANSWER:"
+        "ANSWER:"
     ),
     input_variables=["history", "content", "question"]
 )
@@ -252,7 +269,6 @@ if user_query:
             full_response = f"❌ Error: {str(e)}"
             placeholder.markdown(full_response)
 
-    # Save memory
     st.session_state.chat_history.append({
         "question": user_query,
         "answer": full_response
