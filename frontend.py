@@ -26,7 +26,7 @@ from langchain_community.vectorstores import FAISS
 
 # ---------------- PAGE ----------------
 st.set_page_config(page_title="YouTube RAG Chatbot", layout="wide")
-st.title("🎥 YouTube RAG Chatbot (Unblock Version 🚀)")
+st.title(" YouTube RAG Chatbot")
 
 
 # ---------------- API KEY ----------------
